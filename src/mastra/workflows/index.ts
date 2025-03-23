@@ -1,186 +1,366 @@
-import { openai } from '@ai-sdk/openai';
-import { Agent } from '@mastra/core/agent';
-import { Step, Workflow } from '@mastra/core/workflows';
-import { z } from 'zod';
+import { Workflow, Step } from "@mastra/core/workflows";
+import { z } from "zod";
+import { cloneOutputSchema } from "../tools/github/cloneRepository";
+import path from "path";
+import process from "process";
 
-const llm = openai('gpt-4o');
+// 分析結果のスキーマを定義
+export const analyzeOutputSchema = z
+  .object({
+    success: z.boolean().describe("分析操作が成功したかどうか"),
+    message: z.string().describe("分析結果の詳細メッセージ"),
+    readmeInfo: z
+      .object({
+        title: z
+          .string()
+          .optional()
+          .describe("READMEから抽出したプロジェクトタイトル"),
+        description: z.string().optional().describe("プロジェクトの説明文"),
+        technologies: z
+          .array(z.string())
+          .optional()
+          .describe("使用されている技術スタック一覧"),
+        architecture: z
+          .string()
+          .optional()
+          .describe("プロジェクトのアーキテクチャに関する情報"),
+        installation: z.string().optional().describe("インストール手順"),
+        usage: z.string().optional().describe("使用方法"),
+        contributing: z.string().optional().describe("貢献方法"),
+        license: z.string().optional().describe("ライセンス情報"),
+      })
+      .optional()
+      .describe("READMEファイルから抽出した構造化情報"),
+    tokeiStats: z
+      .object({
+        languageSummary: z
+          .record(
+            z.string(),
+            z.object({
+              files: z.number().describe("ファイル数"),
+              lines: z.number().describe("合計行数"),
+              code: z.number().describe("コード行数"),
+              comments: z.number().describe("コメント行数"),
+              blanks: z.number().describe("空行数"),
+              complexity: z.number().optional().describe("コード複雑度"),
+            })
+          )
+          .optional()
+          .describe("プログラミング言語別の統計情報"),
+        totalSummary: z
+          .object({
+            files: z.number().describe("合計ファイル数"),
+            lines: z.number().describe("合計行数"),
+            code: z.number().describe("合計コード行数"),
+            comments: z.number().describe("合計コメント行数"),
+            blanks: z.number().describe("合計空行数"),
+          })
+          .optional()
+          .describe("リポジトリ全体の統計情報"),
+        mainLanguage: z
+          .string()
+          .optional()
+          .describe("最も使用されているプログラミング言語"),
+      })
+      .optional()
+      .describe("tokeiによる言語統計情報"),
+    directoryStructure: z
+      .object({
+        tree: z
+          .string()
+          .optional()
+          .describe("テキスト形式のディレクトリツリー"),
+        fileTypes: z
+          .record(z.string(), z.number())
+          .optional()
+          .describe("ファイル拡張子ごとの数"),
+        directoryCount: z.number().optional().describe("ディレクトリの総数"),
+        fileCount: z.number().optional().describe("ファイルの総数"),
+        treeJson: z.any().optional().describe("JSON形式のディレクトリ構造"),
+      })
+      .optional()
+      .describe("リポジトリのディレクトリ構造情報"),
+  })
+  .describe("リポジトリ分析の結果");
 
-const agent = new Agent({
-  name: 'Weather Agent',
-  model: llm,
-  instructions: `
-        You are a local activities and travel expert who excels at weather-based planning. Analyze the weather data and provide practical activity recommendations.
+export type AnalyzeOutput = z.infer<typeof analyzeOutputSchema>;
 
-        For each day in the forecast, structure your response exactly as follows:
-
-        📅 [Day, Month Date, Year]
-        ═══════════════════════════
-
-        🌡️ WEATHER SUMMARY
-        • Conditions: [brief description]
-        • Temperature: [X°C/Y°F to A°C/B°F]
-        • Precipitation: [X% chance]
-
-        🌅 MORNING ACTIVITIES
-        Outdoor:
-        • [Activity Name] - [Brief description including specific location/route]
-          Best timing: [specific time range]
-          Note: [relevant weather consideration]
-
-        🌞 AFTERNOON ACTIVITIES
-        Outdoor:
-        • [Activity Name] - [Brief description including specific location/route]
-          Best timing: [specific time range]
-          Note: [relevant weather consideration]
-
-        🏠 INDOOR ALTERNATIVES
-        • [Activity Name] - [Brief description including specific venue]
-          Ideal for: [weather condition that would trigger this alternative]
-
-        ⚠️ SPECIAL CONSIDERATIONS
-        • [Any relevant weather warnings, UV index, wind conditions, etc.]
-
-        Guidelines:
-        - Suggest 2-3 time-specific outdoor activities per day
-        - Include 1-2 indoor backup options
-        - For precipitation >50%, lead with indoor activities
-        - All activities must be specific to the location
-        - Include specific venues, trails, or locations
-        - Consider activity intensity based on temperature
-        - Keep descriptions concise but informative
-
-        Maintain this exact formatting for consistency, using the emoji and section headers as shown.
-      `,
+// ワークフローの入力スキーマ
+const cursorRulesWorkflowSchema = z.object({
+  repositoryUrl: z.string().describe("解析するGitHubリポジトリのURL"),
+  branch: z
+    .string()
+    .optional()
+    .describe("クローンするブランチ（指定しない場合はデフォルトブランチ）"),
+  outputPath: z
+    .string()
+    .optional()
+    .describe("生成したCursor Rulesの出力先パス"),
 });
 
-const fetchWeather = new Step({
-  id: 'fetch-weather',
-  description: 'Fetches weather forecast for a given city',
+type TriggerType = z.infer<typeof cursorRulesWorkflowSchema>;
+
+// ステップ1: リポジトリのクローン
+const cloneRepositoryStep = new Step({
+  id: "clone-repository",
+  description: "GitHubリポジトリをクローンする",
   inputSchema: z.object({
-    city: z.string().describe('The city to get the weather for'),
+    repositoryUrl: z.string(),
+    branch: z.string().optional(),
   }),
-  execute: async ({ context }) => {
-    const triggerData = context?.getStepResult<{ city: string }>('trigger');
-
-    if (!triggerData) {
-      throw new Error('Trigger data not found');
-    }
-
-    const geocodingUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(triggerData.city)}&count=1`;
-    const geocodingResponse = await fetch(geocodingUrl);
-    const geocodingData = (await geocodingResponse.json()) as {
-      results: { latitude: number; longitude: number; name: string }[];
-    };
-
-    if (!geocodingData.results?.[0]) {
-      throw new Error(`Location '${triggerData.city}' not found`);
-    }
-
-    const { latitude, longitude, name } = geocodingData.results[0];
-
-    const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_mean,weathercode&timezone=auto`;
-    const response = await fetch(weatherUrl);
-    const data = (await response.json()) as {
-      daily: {
-        time: string[];
-        temperature_2m_max: number[];
-        temperature_2m_min: number[];
-        precipitation_probability_mean: number[];
-        weathercode: number[];
-      };
-    };
-
-    const forecast = data.daily.time.map((date: string, index: number) => ({
-      date,
-      maxTemp: data.daily.temperature_2m_max[index],
-      minTemp: data.daily.temperature_2m_min[index],
-      precipitationChance: data.daily.precipitation_probability_mean[index],
-      condition: getWeatherCondition(data.daily.weathercode[index]!),
-      location: name,
-    }));
-
-    return forecast;
-  },
-});
-
-const forecastSchema = z.array(
-  z.object({
-    date: z.string(),
-    maxTemp: z.number(),
-    minTemp: z.number(),
-    precipitationChance: z.number(),
-    condition: z.string(),
-    location: z.string(),
+  outputSchema: z.object({
+    success: z.boolean(),
+    repositoryPath: z.string(),
+    message: z.string(),
   }),
-);
-
-const planActivities = new Step({
-  id: 'plan-activities',
-  description: 'Suggests activities based on weather conditions',
-  inputSchema: forecastSchema,
   execute: async ({ context, mastra }) => {
-    const forecast =
-      context?.getStepResult<z.infer<typeof forecastSchema>>('fetch-weather');
+    const { repositoryUrl, branch } =
+      context.getStepResult<TriggerType>("trigger");
 
-    if (!forecast || forecast.length === 0) {
-      throw new Error('Forecast data not found');
+    const agent = mastra?.getAgent("cursorRulesAgent");
+    if (!agent) {
+      throw new Error("cursorRulesAgentが見つかりません");
     }
 
-    const prompt = `Based on the following weather forecast for ${forecast[0]?.location}, suggest appropriate activities:
-      ${JSON.stringify(forecast, null, 2)}
-      `;
-
-    const response = await agent.stream([
+    const response = await agent?.generate(
+      `リポジトリ ${repositoryUrl} をクローンしてください${branch ? `（ブランチ: ${branch}）` : ""}。`,
       {
-        role: 'user',
-        content: prompt,
-      },
-    ]);
+        toolChoice: {
+          type: "tool",
+          toolName: "clone-repository",
+        },
+        output: cloneOutputSchema,
+      }
+    );
 
-    let activitiesText = '';
+    if (!response) {
+      throw new Error("リポジトリのクローンに失敗しました");
+    }
 
-    for await (const chunk of response.textStream) {
-      process.stdout.write(chunk);
-      activitiesText += chunk;
+    const { success, message, repositoryFullPath, cloneDirectoryName } =
+      response.object;
+
+    console.log("クローン結果:", JSON.stringify(response.object, null, 2));
+
+    // 実際のリポジトリパスを決定
+    let actualRepositoryPath = repositoryFullPath;
+
+    // 想定外の値が返された場合のフォールバック処理
+    if (!actualRepositoryPath && cloneDirectoryName) {
+      console.log(
+        `警告: repositoryFullPathが取得できませんでした。cloneDirectoryName ${cloneDirectoryName} から構築します。`
+      );
+      // 相対パスを絶対パスに変換
+      if (path.isAbsolute(cloneDirectoryName)) {
+        actualRepositoryPath = cloneDirectoryName;
+      } else {
+        actualRepositoryPath = path.resolve(process.cwd(), cloneDirectoryName);
+      }
     }
 
     return {
-      activities: activitiesText,
+      success,
+      repositoryPath: actualRepositoryPath || "",
+      message,
     };
   },
 });
 
-function getWeatherCondition(code: number): string {
-  const conditions: Record<number, string> = {
-    0: 'Clear sky',
-    1: 'Mainly clear',
-    2: 'Partly cloudy',
-    3: 'Overcast',
-    45: 'Foggy',
-    48: 'Depositing rime fog',
-    51: 'Light drizzle',
-    53: 'Moderate drizzle',
-    55: 'Dense drizzle',
-    61: 'Slight rain',
-    63: 'Moderate rain',
-    65: 'Heavy rain',
-    71: 'Slight snow fall',
-    73: 'Moderate snow fall',
-    75: 'Heavy snow fall',
-    95: 'Thunderstorm',
-  };
-  return conditions[code] || 'Unknown';
-}
-
-const weatherWorkflow = new Workflow({
-  name: 'weather-workflow',
-  triggerSchema: z.object({
-    city: z.string().describe('The city to get the weather for'),
+// ステップ2: リポジトリの初期分析
+const analyzeRepositoryStep = new Step({
+  id: "analyze-repository",
+  description: "リポジトリの構造と統計情報を収集する",
+  inputSchema: z.object({
+    repositoryPath: z.string(),
   }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    summary: z.string(),
+    readmeInfo: z.any(),
+    tokeiStats: z.any(),
+    directoryStructure: z.any(),
+  }),
+  execute: async ({ context, mastra }) => {
+    const { repositoryPath } = context.getStepResult(cloneRepositoryStep);
+
+    if (!repositoryPath) {
+      throw new Error("リポジトリパスが見つかりません");
+    }
+
+    const agent = mastra?.getAgent("cursorRulesAgent");
+    if (!agent) {
+      throw new Error("cursorRulesAgentが見つかりません");
+    }
+
+    const response = await agent?.generate(
+      `リポジトリ ${repositoryPath} のREADME、tokei統計、ディレクトリ構造を分析してください。
+
+次の手順で進めてください：
+1. READMEの内容を解析して、プロジェクトの目的と概要を把握する
+2. tokeiを使用して言語統計を収集し、使用されている主要言語を特定する
+3. treeコマンドでディレクトリ構造を分析する`,
+      {
+        output: analyzeOutputSchema,
+      }
+    );
+
+    if (!response) {
+      throw new Error("リポジトリの分析に失敗しました");
+    }
+
+    // GenerateObjectResultの場合はobjectプロパティを使用
+    const { success, message, readmeInfo, tokeiStats, directoryStructure } =
+      response.object;
+
+    // 主要言語の特定
+    let mainLanguage = "";
+    if (tokeiStats?.languageSummary) {
+      let maxCode = 0;
+      for (const [lang, stats] of Object.entries(tokeiStats.languageSummary)) {
+        if (stats.code > maxCode) {
+          maxCode = stats.code;
+          mainLanguage = lang;
+        }
+      }
+    }
+
+    return {
+      success: true,
+      summary: message || "",
+      readmeInfo: readmeInfo || {},
+      tokeiStats: tokeiStats || {},
+      directoryStructure: directoryStructure || {},
+      mainLanguage,
+    };
+  },
+});
+
+// ステップ3: 重要ファイルの特定と計画
+const identifyImportantFilesStep = new Step({
+  id: "identify-important-files",
+  description: "重要なファイルを特定し、解析計画を立てる",
+  inputSchema: z.object({
+    repositoryPath: z.string(),
+    summary: z.string(),
+    readmeInfo: z.any(),
+    tokeiStats: z.any(),
+    directoryStructure: z.any(),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    plan: z.string(),
+    importantFiles: z.array(z.string()),
+  }),
+  execute: async ({ context, mastra }) => {
+    const { repositoryPath } = context.getStepResult(cloneRepositoryStep);
+    const { summary, readmeInfo, tokeiStats, directoryStructure } =
+      context.getStepResult(analyzeRepositoryStep);
+
+    const agent = mastra!.getAgent("cursorRulesAgent");
+    const response = await agent.generate(`
+これまでの分析に基づいて、リポジトリ ${repositoryPath} の重要なファイルを特定し、それらをベクトルデータベースに格納するための計画を立ててください。
+以下の情報を参考にしてください：
+1. READMEの分析: ${JSON.stringify(readmeInfo)}
+2. 言語統計: ${JSON.stringify(tokeiStats)}
+3. ディレクトリ構造: ${JSON.stringify(directoryStructure)}
+`);
+
+    return {
+      success: true,
+      plan: response.text,
+      importantFiles: response.toolCalls?.[0]?.args?.importantFiles || [],
+    };
+  },
+});
+
+// ステップ4: ファイルの処理とRAG構築
+const processFilesStep = new Step({
+  id: "process-files",
+  description: "重要ファイルを処理してRAGを構築する",
+  inputSchema: z.object({
+    repositoryPath: z.string(),
+    importantFiles: z.array(z.string()),
+    plan: z.string(),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    processedFiles: z.array(z.string()),
+    message: z.string(),
+  }),
+  execute: async ({ context, mastra }) => {
+    const { repositoryPath } = context.getStepResult(cloneRepositoryStep);
+    const { importantFiles, plan } = context.getStepResult(
+      identifyImportantFilesStep
+    );
+
+    const agent = mastra!.getAgent("cursorRulesAgent");
+    const response = await agent.generate(`
+リポジトリ ${repositoryPath} の重要ファイルをベクトルデータベースに格納してください。
+処理計画: ${plan}
+重要ファイル: ${JSON.stringify(importantFiles)}
+`);
+
+    return {
+      success: true,
+      processedFiles: response.toolCalls?.[0]?.args?.processedFiles || [],
+      message: response.text,
+    };
+  },
+});
+
+// ステップ5: チートシート生成
+const generateCursorRulesStep = new Step({
+  id: "generate-cursor-rules",
+  description: "ベクトルデータベースの情報を元にCursor Rulesを生成する",
+  inputSchema: z.object({
+    repositoryPath: z.string(),
+    processedFiles: z.array(z.string()),
+    outputPath: z.string().optional(),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    cursorRules: z.string(),
+    outputPath: z.string(),
+  }),
+  execute: async ({ context, mastra }) => {
+    const { repositoryPath } = context.getStepResult(cloneRepositoryStep);
+    const { processedFiles } = context.getStepResult(processFilesStep);
+    const { outputPath } = context.getStepResult("trigger");
+
+    const finalOutputPath =
+      outputPath || `./.cursor/rules/${repositoryPath.split("/").pop()}.mdc`;
+
+    const agent = mastra!.getAgent("cursorRulesAgent");
+    const response = await agent.generate(`
+ベクトルデータベースに格納された情報を元に、${repositoryPath} プロジェクトのためのCursor Rulesチートシートを生成してください。
+処理済みファイル: ${JSON.stringify(processedFiles)}
+出力先パス: ${finalOutputPath}
+
+チートシートには以下の内容を含めてください：
+1. プロジェクトの全体構造と設計パターン
+2. 重要なクラス・関数と依存関係
+3. コーディング規約と命名パターン
+4. ユニークなデザインパターンと実装の特徴
+`);
+
+    return {
+      success: true,
+      cursorRules: response.text,
+      outputPath: finalOutputPath,
+    };
+  },
+});
+
+// ワークフローの定義
+export const cursorRulesWorkflow = new Workflow({
+  name: "cursor-rules-workflow",
+  triggerSchema: cursorRulesWorkflowSchema,
 })
-  .step(fetchWeather)
-  .then(planActivities);
+  .step(cloneRepositoryStep)
+  .then(analyzeRepositoryStep)
+  .then(identifyImportantFilesStep)
+  .then(processFilesStep)
+  .then(generateCursorRulesStep);
 
-weatherWorkflow.commit();
-
-export { weatherWorkflow };
+// ワークフローをコミット
+cursorRulesWorkflow.commit();
