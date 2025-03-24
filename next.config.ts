@@ -2,10 +2,14 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   images: {
-    domains: ["あなたのプロジェクトID.supabase.co"], // Supabaseのドメインに置き換え
+    domains: ["prvougjuwditovhundlz.supabase.co"], // 実際のSupabaseプロジェクトIDを使用
   },
   experimental: {
-    serverActions: true,
+    // serverActionsをオブジェクトとして設定
+    serverActions: {
+      allowedOrigins: ["localhost:3000"],
+      bodySizeLimit: "2mb",
+    },
   },
 };
 
