@@ -10,7 +10,12 @@
     "dev": "mastra dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "docker:start": "concurrently \"npm run dev:mastra\" \"sleep 5 && npm run dev:next\"",
+    "docker:build": "docker-compose build",
+    "docker:up": "docker-compose up",
+    "docker:down": "docker-compose down",
+    "docker:clean": "docker system prune -a -f --volumes"
   },
   "keywords": [],
   "author": "",
@@ -24,6 +29,7 @@
     "@mastra/rag": "^0.1.12",
     "@supabase/auth-helpers-nextjs": "^0.10.0",
     "@supabase/supabase-js": "^2.49.1",
+    "concurrently": "^8.2.2",
     "mastra": "^0.4.2",
     "next": "^15.2.3",
     "react": "^19.0.0",

@@ -1,9 +1,19 @@
 output.txt
-node_modules
+node_modules/
 dist
-.mastra
+.mastra/
 .env.development
 .env.local
+.env.*.local
+.env.docker
 .env
 .env*
 *.db
+*.log
+local.db
+vector_store.db
+
+# Docker関連
+.docker/
+docker-compose.override.yml
+.DS_Store
