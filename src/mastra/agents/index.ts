@@ -12,6 +12,7 @@ import {
 import { Memory } from "@mastra/memory";
 import { LibSQLStore } from "@mastra/core/storage/libsql";
 import { LibSQLVector } from "@mastra/core/vector/libsql";
+import { cameraSettingsAgent } from "./cameraSettingsAgent";
 
 const memory = new Memory({
   storage: new LibSQLStore({
@@ -87,3 +88,6 @@ export const cursorRulesAgent = new Agent({
   },
   memory,
 });
+
+// カメラ設定エージェントのエクスポート
+export { cameraSettingsAgent };
