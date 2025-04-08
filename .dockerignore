@@ -1,0 +1,36 @@
+# 開発環境固有のファイル
+node_modules
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# ビルド生成物
+.next
+.mastra
+out
+build
+dist
+
+# 大きなデータファイル
+*.db
+local.db
+vector_store.db
+
+# Git関連
+.git
+.gitignore
+
+# エディタ固有のファイル
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS固有のファイル
+.DS_Store
+Thumbs.db
+
+# 環境変数
+.env*
+!.env.docker
+!.env.example

@@ -14,3 +14,8 @@ export { vectorQueryTool } from "./rag/vectorQuery";
 
 // チートシートツール
 export { saveCheatsheetTool } from "./cheatsheet/saveCheatsheet";
+
+// カメラ関連ツール
+export { imageAnalyzerTool } from "./camera/imageAnalyzer";
+export { sceneDetectorTool } from "./camera/sceneDetector";
+export { settingsRecommenderTool } from "./camera/settingsRecommender";
